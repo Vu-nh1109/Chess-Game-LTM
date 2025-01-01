@@ -155,11 +155,6 @@ void *receiveMessages(void *arg)
             printf("Opponent refused the draw.\n");
             break;
         }
-        case MSG_HISTORY:
-        {
-            printf("=======================================\n%s\n", (char *)msg.data);
-            break;
-        }
         default:
             printf("Unknown message type received.\n");
             break;
@@ -300,11 +295,6 @@ void *sendMessages(void *arg)
         else if (strcmp(buffer, "current board") == 0)
         {
             Message msg = create_message(MSG_GET_BOARD, NULL, 0);
-            send_message(sock, &msg);
-        }
-        else if (strcmp(buffer, "history") == 0)
-        {
-            Message msg = create_message(MSG_GET_HISTORY, NULL, 0);
             send_message(sock, &msg);
         }
         else if (strcmp(buffer, "help") == 0)
