@@ -21,7 +21,9 @@ typedef enum {
     MSG_GAME_DRAW,
     MSG_WAIT,
     MSG_GET_LEADERBOARD,
-    MSG_LEADERBOARD
+    MSG_LEADERBOARD,
+    MSG_GET_HISTORY,
+    MSG_HISTORY
 } MessageType;
 
 typedef enum {

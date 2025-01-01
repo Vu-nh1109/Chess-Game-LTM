@@ -8,12 +8,13 @@
 
 #define PORT 8000
 #define BUFFER_SIZE 1024
+#define CLEAR_LINE "\r\033[K"
 
 int sock;
-char buffer[BUFFER_SIZE];
 int board[8][8];
 volatile int running = 1;
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t message_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /*
 const char *PIECE_SYMBOLS[] = {
@@ -57,10 +58,8 @@ void *receiveMessages(void *arg)
         // Print the received message
         printf("%s \n", buffer);
         */
-
-        Message msg;
-        free_message_data(&msg);
-        msg = receive_message(sock);
+        pthread_mutex_lock(&message_mutex);
+        Message msg = receive_message(sock);
         if (msg.status == STATUS_ERROR)
         {
             printf("Server disconnected.\n");
@@ -69,6 +68,9 @@ void *receiveMessages(void *arg)
             pthread_mutex_unlock(&mutex);
             exit(1);
         }
+
+        printf("%s", CLEAR_LINE);
+
         switch (msg.type)
         {
         case MSG_GAME_BOARD:
@@ -153,10 +155,18 @@ void *receiveMessages(void *arg)
             printf("Opponent refused the draw.\n");
             break;
         }
+        case MSG_HISTORY:
+        {
+            printf("=======================================\n%s\n", (char *)msg.data);
+            break;
+        }
         default:
             printf("Unknown message type received.\n");
             break;
         }
+        fflush(stdout);
+        free_message_data(&msg);
+        pthread_mutex_unlock(&message_mutex);
     }
     return NULL;
 }
@@ -165,9 +175,17 @@ void *receiveMessages(void *arg)
 void *sendMessages(void *arg)
 {
     printf("Type 'help' for a list of commands.\n");
+    fflush(stdout);
     while (running)
     {
+        char buffer[BUFFER_SIZE];
         fgets(buffer, sizeof(buffer), stdin);
+
+        Message msg;
+        free_message_data(&msg);
+
+        // Clear the current line
+        printf("%s", CLEAR_LINE);
 
         // Remove trailing newline character
         buffer[strcspn(buffer, "\n")] = '\0';
@@ -284,6 +302,11 @@ void *sendMessages(void *arg)
             Message msg = create_message(MSG_GET_BOARD, NULL, 0);
             send_message(sock, &msg);
         }
+        else if (strcmp(buffer, "history") == 0)
+        {
+            Message msg = create_message(MSG_GET_HISTORY, NULL, 0);
+            send_message(sock, &msg);
+        }
         else if (strcmp(buffer, "help") == 0)
         {
             printf("List of commands:\n");
@@ -305,6 +328,9 @@ void *sendMessages(void *arg)
             printf("Invalid command! Check \"help\"\n");
             continue;
         }
+
+        free_message_data(&msg);
+        memset(buffer, 0, sizeof(buffer));
     }
     return NULL;
 }
@@ -322,7 +348,7 @@ int main()
     }
 
     server.sin_family = AF_INET;
-    server.sin_addr.s_addr = inet_addr("127.0.0.1");
+    server.sin_addr.s_addr = inet_addr("172.31.73.220");
     server.sin_port = htons(PORT);
 
     // Connect to server

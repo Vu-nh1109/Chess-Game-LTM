@@ -202,6 +202,7 @@ void sendBoardToBothClients()
             send_message(players[i].client_sock, &msg);
         }
     }
+    free_message_data(&msg);
 }
 
 /*
@@ -425,10 +426,7 @@ void *handleClient(void *client_socket)
 
         // Handle client commands here
         Message msg, newMsg;
-        free_message_data(&msg);
-        free_message_data(&newMsg);
         char buffer[BUFFER_SIZE];
-        memset(buffer, 0, sizeof(buffer));
         msg = receive_message(client_sock_local);
         if (msg.status == STATUS_ERROR)
         {
@@ -458,19 +456,19 @@ void *handleClient(void *client_socket)
                 {
                     board[moveData->dest_row][moveData->dest_col] = board[moveData->src_row][moveData->src_col];
                     board[moveData->src_row][moveData->src_col] = EMPTY;
-                    printf("Player %s moved from (%d, %d) to (%d, %d)\n", players[currentPlayer].username, moveData->src_row, moveData->src_col, moveData->dest_row, moveData->dest_col);
+                    printf("Player %s moved from (%d, %d) to (%d, %d)\n", players[currentPlayer - 1].username, moveData->src_row, moveData->src_col, moveData->dest_row, moveData->dest_col);
                     if (moveResult == 2) // Checkmate
                     {
                         // printBoardToAllClients();
                         // Message newMsg = create_message(MSG_GAME_BOARD, board, sizeof(board));
                         // send_message(client_sock_local, &newMsg);
                         // send_message(opponent, &newMsg);
-                        sendBoardToBothClients();
+                        // sendBoardToBothClients();
                         int opponent = (client_sock_local == players[0].client_sock) ? players[1].client_sock : players[0].client_sock;
-                        Message newMsg = create_message(MSG_GAME_WIN, "Checkmate! You win!", strlen("Checkmate! You win!"));
-                        printf("Player %s wins!\n", players[currentPlayer].username);
+                        Message newMsg = create_message(MSG_GAME_WIN, "Checkmate! You win!\nType\"ready\" to play again", strlen("Checkmate! You win!\nType\"ready\" to play again"));
+                        printf("Player %s wins!\n", players[currentPlayer - 1].username);
                         send_message(client_sock_local, &newMsg);
-                        newMsg = create_message(MSG_GAME_LOSE, "Checkmate! You lose!", strlen("Checkmate! You lose!"));
+                        newMsg = create_message(MSG_GAME_LOSE, "Checkmate! You lose!Type\"ready\" to play again", strlen("Checkmate! You lose!Type\"ready\" to play again"));
                         send_message(opponent, &newMsg);
                         gameState = 0;
                         // Update win/loss records
@@ -758,13 +756,18 @@ void *handleClient(void *client_socket)
             else
             {
                 char buffer[BUFFER_SIZE];
+                printf("%s: %s\n", players[(client_sock_local == players[0].client_sock) ? 0 : 1].username, chatData->message);
                 snprintf(buffer, sizeof(buffer), "%s: %s", players[(client_sock_local == players[0].client_sock) ? 0 : 1].username, chatData->message);
                 Message newMsg = create_message(MSG_CHAT, buffer, strlen(buffer));
                 int opponent = players[(client_sock_local == players[0].client_sock) ? 1 : 0].client_sock;
                 if (opponent != -1)
                 {
                     send_message(opponent, &newMsg);
-                    printf("%s: %s\n", players[(client_sock_local == players[0].client_sock) ? 0 : 1].username, chatData->message);
+                }
+                else
+                {
+                    Message errMsg = create_message(MSG_ERROR, "Opponent is not connected", strlen("Opponent is not connected"));
+                    send_message(client_sock_local, &errMsg);
                 }
             }
             break;
@@ -848,6 +851,9 @@ void *handleClient(void *client_socket)
             send_message(client_sock_local, &newMsg);
             break;
         }
+        free_message_data(&msg);
+        free_message_data(&newMsg);
+        memset(buffer, 0, sizeof(buffer));
         /*
         if (strncmp(buffer, "move ", 5) == 0)
         {
