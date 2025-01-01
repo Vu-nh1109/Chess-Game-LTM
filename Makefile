@@ -1,10 +1,24 @@
+CC = gcc
+CFLAGS = -Wall -I.
+LDFLAGS = -pthread
+
+PROTOCOL_SRC = protocol.c
+PROTOCOL_OBJ = protocol.o
+SERVER_SRC = server.c
+CLIENT_SRC = client.c
+
 all: server client
 
-server: server.c
-	gcc -o server server.c
+protocol.o: $(PROTOCOL_SRC) protocol.h
+	$(CC) $(CFLAGS) -c $(PROTOCOL_SRC)
 
-client: client.c
-	gcc -o client client.c
+server: $(SERVER_SRC) $(PROTOCOL_OBJ)
+	$(CC) $(CFLAGS) -o server $(SERVER_SRC) $(PROTOCOL_OBJ) $(LDFLAGS)
+
+client: $(CLIENT_SRC) $(PROTOCOL_OBJ)
+	$(CC) $(CFLAGS) -o client $(CLIENT_SRC) $(PROTOCOL_OBJ) $(LDFLAGS)
 
 clean:
-	rm -f server client
+	rm -f server client *.o
+
+.PHONY: all clean

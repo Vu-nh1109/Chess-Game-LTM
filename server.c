@@ -4,10 +4,106 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <pthread.h>
+#include <stdbool.h>
+#include "protocol.h"
 
 #define PORT 8000
 #define BUFFER_SIZE 1024
 #define MAX_CLIENTS 2
+
+typedef struct Account
+{
+    char username[50];
+    char password[50];
+    int wins;
+    int losses;
+    int draws;
+    struct Account *next;
+} Account;
+
+Account *head = NULL;
+
+void loadAccounts()
+{
+    FILE *file = fopen("account.txt", "r");
+    if (file == NULL)
+    {
+        perror("Unable to open account file.");
+        exit(1);
+    }
+
+    Account *current = NULL;
+    while (1)
+    {
+        Account *newAccount = (Account *)malloc(sizeof(Account));
+        if (fscanf(file, "%s %s %d %d %d", newAccount->username, newAccount->password, &newAccount->wins, &newAccount->losses, &newAccount->draws) == 5)
+        {
+            newAccount->next = NULL;
+
+            if (head == NULL)
+            {
+                head = newAccount;
+                current = head;
+            }
+            else
+            {
+                current->next = newAccount;
+                current = current->next;
+            }
+        }
+        else
+        {
+            free(newAccount);
+            break;
+        }
+    }
+
+    fclose(file);
+}
+
+void saveAccounts()
+{
+    FILE *file = fopen("account.txt", "w");
+    if (file == NULL)
+    {
+        perror("Unable to save accounts.");
+        exit(1);
+    }
+
+    Account *current = head;
+    while (current != NULL)
+    {
+        fprintf(file, "%s %s %d %d %d\n", current->username, current->password, current->wins, current->losses, current->draws);
+        current = current->next;
+    }
+    fclose(file);
+}
+
+Account *findAccount(char *username)
+{
+    Account *current = head;
+    while (current != NULL)
+    {
+        if (strcmp(current->username, username) == 0)
+        {
+            return current;
+        }
+        current = current->next;
+    }
+    return NULL;
+}
+
+void freeAccounts()
+{
+    Account *current = head;
+    while (current != NULL)
+    {
+        Account *next = current->next;
+        free(current);
+        current = next;
+    }
+    head = NULL;
+}
 
 // Chess pieces representation
 #define EMPTY 0
@@ -24,16 +120,19 @@
 #define QUEEN_G2 11
 #define KING_G2 12
 
-const char *PIECE_SYMBOLS[] = {
-    "  ", "♙ ", "♘ ", "♗ ", "♖ ", "♕ ", "♔ ",
-    "♟ ", "♞ ", "♝ ", "♜ ", "♛ ", "♚ "};
+struct Player
+{
+    int client_sock;
+    char username[50];
+    bool ready;
+} typedef Player;
 
-int board[8][8];              // Chessboard state
-int currentPlayer = 1;        // Track whose turn it is
-int connectedClients = 0;     // Track number of connected clients
-int client_sock[MAX_CLIENTS]; // Array to hold client sockets
-int draw_requested = 0;
-int ganeState = 0;            // 0 if game hasn't started
+int board[8][8];             // Chessboard state
+int currentPlayer = 1;       // Track whose turn it is
+int connectedClients = 0;    // Track number of connected clients
+Player players[MAX_CLIENTS]; // Array to hold client sockets
+int draw_requested = 0;      // 1 if a draw has been requested
+int gameState = 0;           // 0 if game hasn't started
 
 pthread_mutex_t client_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -65,6 +164,47 @@ void initializeBoard()
             board[i][j] = EMPTY;
 }
 
+const char *PIECE_SYMBOLS[] = {
+    "  ", "♙ ", "♘ ", "♗ ", "♖ ", "♕ ", "♔ ",
+    "♟ ", "♞ ", "♝ ", "♜ ", "♛ ", "♚ "};
+
+void sendBoardToBothClients()
+{
+    char buffer[BUFFER_SIZE];
+    snprintf(buffer, sizeof(buffer), "Current Board:\n");
+    for (int i = 0; i < 9; i++)
+    {
+        if (i > 0)
+            snprintf(buffer + strlen(buffer), sizeof(buffer) - strlen(buffer), "%d ", i - 1);
+        else
+            snprintf(buffer + strlen(buffer), sizeof(buffer) - strlen(buffer), "  ");
+        for (int j = 1; j < 9; j++)
+        {
+            if (i == 0)
+                snprintf(buffer + strlen(buffer), sizeof(buffer) - strlen(buffer), "%d ", j - 1);
+            else
+                snprintf(buffer + strlen(buffer), sizeof(buffer) - strlen(buffer), "%s", PIECE_SYMBOLS[board[i - 1][j - 1]]);
+        }
+
+        if (i == 4)
+            snprintf(buffer + strlen(buffer), sizeof(buffer) - strlen(buffer), "%10s Player1: %s", "", players[0].username);
+        else if (i == 5)
+            snprintf(buffer + strlen(buffer), sizeof(buffer) - strlen(buffer), "%10s Player2: %s", "", players[1].username);
+        snprintf(buffer + strlen(buffer), sizeof(buffer) - strlen(buffer), "\n");
+    }
+    const char *turn_msg = (currentPlayer == 1) ? "Player 1's turn (White)" : "Player 2's turn (Black)";
+    snprintf(buffer + strlen(buffer), sizeof(buffer) - strlen(buffer), "%s\n", turn_msg);
+    Message msg = create_message(MSG_GAME_BOARD, buffer, sizeof(buffer));
+    for (int i = 0; i < MAX_CLIENTS; i++)
+    {
+        if (players[i].client_sock != -1)
+        {
+            send_message(players[i].client_sock, &msg);
+        }
+    }
+}
+
+/*
 void printBoardToAllClients()
 {
     char buffer[BUFFER_SIZE];
@@ -92,39 +232,21 @@ void printBoardToAllClients()
     pthread_mutex_lock(&client_mutex);
     for (int i = 0; i < MAX_CLIENTS; i++)
     {
-        if (client_sock[i] != -1)
+        if (players[i].client_sock != -1)
         { // Check if client is connected
-            if (send(client_sock[i], buffer, strlen(buffer), 0) == -1)
+            if (send(players[i].client_sock, buffer, strlen(buffer), 0) == -1)
             {
                 // Handle disconnection if sending fails
                 printf("Client %d disconnected.\n", i);
-                close(client_sock[i]);
-                client_sock[i] = -1;
+                close(players[i].client_sock);
+                players[i].client_sock = -1;
                 connectedClients--; // Decrease the count of connected clients
             }
         }
     }
     pthread_mutex_unlock(&client_mutex);
 }
-
-int checkForWin(int player)
-{
-    int kingPiece = (player == 1) ? KING_G2 : KING_G1; // Opponent's king
-
-    // Check if the opponent's king is captured
-    for (int i = 0; i < 8; i++)
-    {
-        for (int j = 0; j < 8; j++)
-        {
-            if (board[i][j] == kingPiece)
-            {
-                return 0; // The king is still on the board, no winner yet
-            }
-        }
-    }
-
-    return 1; // Opponent's king is captured, this player wins
-}
+*/
 
 int isValidMove(int src_row, int src_col, int dest_row, int dest_col, int player)
 {
@@ -155,7 +277,11 @@ int isValidMove(int src_row, int src_col, int dest_row, int dest_col, int player
         if (src_col == dest_col && src_row == 1 && dest_row == 3 && target == EMPTY)
             return 1; // Double move
         if (abs(dest_col - src_col) == 1 && dest_row == src_row + 1 && target > 6)
-            return 1; // Capture
+        {
+            if (target == KING_G2)
+                return 2; // Checkmate
+            return 1;     // Capture
+        }
         break;
     case PAWN_G2:
         if (src_col == dest_col && dest_row == src_row - 1 && target == EMPTY)
@@ -163,14 +289,23 @@ int isValidMove(int src_row, int src_col, int dest_row, int dest_col, int player
         if (src_col == dest_col && src_row == 6 && dest_row == 4 && target == EMPTY)
             return 1; // Double move
         if (abs(dest_col - src_col) == 1 && dest_row == src_row - 1 && target <= 6)
-            return 1; // Capture
+        {
+            if (target == KING_G1)
+                return 2; // Checkmate
+            return 1;     // Capture
+        }
         break;
     case KNIGHT_G1:
     case KNIGHT_G2:
         if ((abs(src_row - dest_row) == 2 && abs(src_col - dest_col) == 1) ||
             (abs(src_row - dest_row) == 1 && abs(src_col - dest_col) == 2))
         {
-            return target == EMPTY || (player == 1 && target > 6) || (player == 2 && target <= 6); // Capture or move
+            if (target == EMPTY || (player == 1 && target > 6) || (player == 2 && target <= 6))
+            {
+                if ((player == 1 && target == KING_G2) || (player == 2 && target == KING_G1))
+                    return 2; // Checkmate
+                return 1;     // Capture or move
+            }
         }
         break;
     case BISHOP_G1:
@@ -185,7 +320,9 @@ int isValidMove(int src_row, int src_col, int dest_row, int dest_col, int player
                 if (board[src_row + i * row_step][src_col + i * col_step] != EMPTY)
                     return 0; // Obstacle
             }
-            return 1; // Valid move
+            if ((player == 1 && target == KING_G2) || (player == 2 && target == KING_G1))
+                return 2; // Checkmate
+            return 1;     // Valid move
         }
         break;
     case ROOK_G1:
@@ -199,22 +336,45 @@ int isValidMove(int src_row, int src_col, int dest_row, int dest_col, int player
                 if (board[src_row + (src_row == dest_row ? 0 : i * step)][src_col + (src_col == dest_col ? 0 : i * step)] != EMPTY)
                     return 0; // Obstacle
             }
-            return 1; // Valid move
+            if ((player == 1 && target == KING_G2) || (player == 2 && target == KING_G1))
+                return 2; // Checkmate
+            return 1;     // Valid move
         }
         break;
     case QUEEN_G1:
     case QUEEN_G2:
-        if ((abs(src_row - dest_row) == abs(src_col - dest_col) || src_row == dest_row || src_col == dest_col) && (target == EMPTY || (player == 1 && target > 6) || (player == 2 && target <= 6)))
+        // Check if move is like a rook (horizontal/vertical)
+        if (src_row == dest_row || src_col == dest_col)
         {
-            // Check for obstacles
-            int row_step = (dest_row - src_row) ? (dest_row - src_row) / abs(dest_row - src_row) : 0;
-            int col_step = (dest_col - src_col) ? (dest_col - src_col) / abs(dest_col - src_col) : 0;
+            int step = (src_row == dest_row) ? (dest_col - src_col) / abs(dest_col - src_col) : (dest_row - src_row) / abs(dest_row - src_row);
             for (int i = 1; i < (src_row == dest_row ? abs(dest_col - src_col) : abs(dest_row - src_row)); i++)
+            {
+                if (board[src_row + (src_row == dest_row ? 0 : i * step)][src_col + (src_col == dest_col ? 0 : i * step)] != EMPTY)
+                    return 0; // Obstacle
+            }
+            if (target == EMPTY || (player == 1 && target > 6) || (player == 2 && target <= 6))
+            {
+                if ((player == 1 && target == KING_G2) || (player == 2 && target == KING_G1))
+                    return 2; // Checkmate
+                return 1;     // Valid move
+            }
+        }
+        // Check if move is like a bishop (diagonal)
+        else if (abs(src_row - dest_row) == abs(src_col - dest_col))
+        {
+            int row_step = (dest_row - src_row) / abs(dest_row - src_row);
+            int col_step = (dest_col - src_col) / abs(dest_col - src_col);
+            for (int i = 1; i < abs(dest_row - src_row); i++)
             {
                 if (board[src_row + i * row_step][src_col + i * col_step] != EMPTY)
                     return 0; // Obstacle
             }
-            return 1; // Valid move
+            if (target == EMPTY || (player == 1 && target > 6) || (player == 2 && target <= 6))
+            {
+                if ((player == 1 && target == KING_G2) || (player == 2 && target == KING_G1))
+                    return 2; // Checkmate
+                return 1;     // Valid move
+            }
         }
         break;
     case KING_G1:
@@ -231,124 +391,560 @@ int isValidMove(int src_row, int src_col, int dest_row, int dest_col, int player
 void *handleClient(void *client_socket)
 {
     int client_sock_local = *(int *)client_socket; // Renamed to avoid conflict with global client_sock
+    // bool waiting = false;
+
     pthread_mutex_lock(&client_mutex);
     connectedClients++;
-    if (connectedClients == 1)
-    {
-        char wait_msg[] = "You are the first player. Waiting for another player...\n";
-        send(client_sock_local, wait_msg, strlen(wait_msg), 0);
-    }
+    // if (connectedClients == 1)
+    // {
+    //     waiting = true;
+    // }
     pthread_mutex_unlock(&client_mutex);
 
     // Wait for the second player to connect
-    while (connectedClients < 2)
-    {
-        sleep(1); // Waiting for the second client
-    }
+    // while (waiting && connectedClients < 2)
+    // {
+    //     pthread_mutex_unlock(&client_mutex); // Ensure mutex is unlocked while sleeping
+    //     sleep(1); // Waiting for the second client
+    //     pthread_mutex_lock(&client_mutex);
+    // }
 
-    // Start the game
-    if (connectedClients == 2)
+    while (1)
     {
-        char start_msg[] = "Both players are connected. Starting the game!\n";
-        send(client_sock_local, start_msg, strlen(start_msg), 0);
-        initializeBoard();
-        printBoardToAllClients(); // Send the board to both clients
 
+        /*
         char buffer[BUFFER_SIZE];
-        while (1)
+        int bytes_received = recv(client_sock_local, buffer, sizeof(buffer), 0);
+        if (bytes_received <= 0)
         {
-            int bytes_received = recv(client_sock_local, buffer, sizeof(buffer), 0);
-            if (bytes_received <= 0)
-            {
-                printf("Client disconnected.\n");
-                break;
-            }
-            buffer[bytes_received] = '\0'; // Null-terminate the string
+            printf("Client disconnected.\n");
+            break;
+        }
+        buffer[bytes_received] = '\0'; // Null-terminate the string
+        */
 
-            if (strncmp(buffer, "move ", 5) == 0)
+        // Handle client commands here
+        Message msg, newMsg;
+        free_message_data(&msg);
+        free_message_data(&newMsg);
+        char buffer[BUFFER_SIZE];
+        memset(buffer, 0, sizeof(buffer));
+        msg = receive_message(client_sock_local);
+        if (msg.status == STATUS_ERROR)
+        {
+            if (strlen(players[(client_sock_local == players[0].client_sock) ? 0 : 1].username) > 0)
             {
-                if (currentPlayer != (client_sock_local == client_sock[0] ? 1 : 2))
+                printf("Client %s disconnected.\n", players[(client_sock_local == players[0].client_sock) ? 0 : 1].username);
+            }
+            else
+                printf("Client disconnected.\n");
+            break;
+        }
+        switch (msg.type)
+        {
+        case MSG_MOVE:
+        {
+            if (gameState == 1)
+            {
+                MoveData *moveData = (MoveData *)msg.data;
+                if ((currentPlayer == 1 && client_sock_local != players[0].client_sock) || (currentPlayer == 2 && client_sock_local != players[1].client_sock))
                 {
                     send(client_sock_local, "It's not your turn!\n", strlen("It's not your turn!\n"), 0);
                     continue; // Skip this iteration and wait for the correct turn
                 }
 
-                int src_row, src_col, dest_row, dest_col;
-                sscanf(buffer + 5, "%d %d %d %d", &src_row, &src_col, &dest_row, &dest_col);
-
-                if (isValidMove(src_row, src_col, dest_row, dest_col, currentPlayer))
+                int moveResult = isValidMove(moveData->src_row, moveData->src_col, moveData->dest_row, moveData->dest_col, currentPlayer);
+                if (moveResult > 0)
                 {
-                    board[dest_row][dest_col] = board[src_row][src_col];
-                    board[src_row][src_col] = EMPTY;
-                    /*
-                    if (checkForWin(currentPlayer == 1 ? 2 : 1))
+                    board[moveData->dest_row][moveData->dest_col] = board[moveData->src_row][moveData->src_col];
+                    board[moveData->src_row][moveData->src_col] = EMPTY;
+                    printf("Player %s moved from (%d, %d) to (%d, %d)\n", players[currentPlayer].username, moveData->src_row, moveData->src_col, moveData->dest_row, moveData->dest_col);
+                    if (moveResult == 2) // Checkmate
                     {
-                        char win_msg[] = "You win! The opponent's king has been captured.\n";
-                        send(client_sock_local, win_msg, strlen(win_msg), 0);
-
-                        // Notify the opponent about the loss
-                        int opponent = (client_sock_local == client_sock[0]) ? client_sock[1] : client_sock[0];
-                        send(opponent, "You lose! Your king has been captured.\n", strlen("You lose! Your king has been captured.\n"), 0);
+                        // printBoardToAllClients();
+                        // Message newMsg = create_message(MSG_GAME_BOARD, board, sizeof(board));
+                        // send_message(client_sock_local, &newMsg);
+                        // send_message(opponent, &newMsg);
+                        sendBoardToBothClients();
+                        int opponent = (client_sock_local == players[0].client_sock) ? players[1].client_sock : players[0].client_sock;
+                        Message newMsg = create_message(MSG_GAME_WIN, "Checkmate! You win!", strlen("Checkmate! You win!"));
+                        printf("Player %s wins!\n", players[currentPlayer].username);
+                        send_message(client_sock_local, &newMsg);
+                        newMsg = create_message(MSG_GAME_LOSE, "Checkmate! You lose!", strlen("Checkmate! You lose!"));
+                        send_message(opponent, &newMsg);
+                        gameState = 0;
+                        // Update win/loss records
+                        Account *winner = findAccount(players[(client_sock_local == players[0].client_sock) ? 0 : 1].username);
+                        Account *loser = findAccount(players[(client_sock_local == players[0].client_sock) ? 1 : 0].username);
+                        if (winner)
+                            winner->wins++;
+                        if (loser)
+                            loser->losses++;
+                        saveAccounts();
                     }
-                    */
-                    currentPlayer = (currentPlayer == 1) ? 2 : 1;
-                    printBoardToAllClients();
+                    else
+                    {
+                        currentPlayer = (currentPlayer == 1) ? 2 : 1;
+                        // printBoardToAllClients();
+                        // Message newMsg = create_message(MSG_GAME_BOARD, board, sizeof(board));
+                        // send_message(client_sock_local, &newMsg);
+                        // int opponent = (client_sock_local == players[0].client_sock) ? players[1].client_sock : players[0].client_sock;
+                        // send_message(opponent, &newMsg);
+                        sendBoardToBothClients();
+                    }
                 }
                 else
                 {
-                    send(client_sock_local, "Invalid move!\n", strlen("Invalid move!\n"), 0);
+                    Message newMsg = create_message(MSG_ERROR, "Invalid move!", strlen("Invalid move!"));
+                    send_message(client_sock_local, &newMsg);
                 }
             }
-            else if (strcmp(buffer, "draw") == 0)
+            else
+            {
+                Message newMsg = create_message(MSG_ERROR, "Game hasn't started yet.", strlen("Game hasn't started yet."));
+                send_message(client_sock_local, &newMsg);
+            }
+
+            break;
+        }
+        case MSG_REQUEST_DRAW:
+        {
+            if (gameState == 0)
+            {
+                Message newMsg = create_message(MSG_ERROR, "Game hasn't started yet.", strlen("Game hasn't started yet."));
+                send_message(client_sock_local, &newMsg);
+            }
+            else
             {
                 if (draw_requested == 0)
                 {
                     // First player requests a draw
+                    printf("Player %s requests a draw.\n", players[(client_sock_local == players[0].client_sock) ? 0 : 1].username);
                     draw_requested = 1; // Set draw request
-                    send(client_sock_local, "Draw request sent to opponent.\n", strlen("Draw request sent to opponent.\n"), 0);
+                    Message newMsg = create_message(MSG_SUCCESS, "Draw request sent to opponent.", strlen("Draw request sent to opponent."));
+                    send_message(client_sock_local, &newMsg);
 
                     // Notify opponent
-                    int opponent = (client_sock_local == client_sock[0]) ? client_sock[1] : client_sock[0];
-                    send(opponent, "Opponent requests a draw. Type 'draw' to accept.\n", strlen("Opponent requests a draw. Type 'draw' to accept.\n"), 0);
+                    int opponent = (client_sock_local == players[0].client_sock) ? players[1].client_sock : players[0].client_sock;
+                    newMsg = create_message(MSG_REQUEST_DRAW, NULL, 0);
+                    send_message(opponent, &newMsg);
                 }
                 else
                 {
-                    // Second player accepts the draw
-                    send(client_sock_local, "You accepted the draw. Game ends in a draw.\n", strlen("You accepted the draw. Game ends in a draw.\n"), 0);
-
-                    // Notify opponent
-                    int opponent = (client_sock_local == client_sock[0]) ? client_sock[1] : client_sock[0];
-                    send(opponent, "Opponent accepted the draw. Game ends in a draw.\n", strlen("Opponent accepted the draw. Game ends in a draw.\n"), 0);
-
-                    // End the game (implement proper cleanup here)
-                    draw_requested = 0; // Reset draw state
+                    Message newMsg = create_message(MSG_ERROR, "Draw already requested.", strlen("Draw already requested."));
+                    send_message(client_sock_local, &newMsg);
                 }
             }
-            else if (strcmp(buffer, "surrender") == 0)
+            break;
+        }
+        case MSG_ACCEPT_DRAW:
+        {
+            if (gameState == 0)
             {
-                send(client_sock_local, "You surrendered. Game over.\n", strlen("You surrendered. Game over.\n"), 0);
-                int opponent = (client_sock_local == client_sock[0]) ? client_sock[1] : client_sock[0];
-                send(opponent, "Opponent surrendered. You win!\n", strlen("Opponent surrendered. You win!\n"), 0);
+                Message newMsg = create_message(MSG_ERROR, "Game hasn't started yet.", strlen("Game hasn't started yet."));
+                send_message(client_sock_local, &newMsg);
             }
             else
             {
-                send(client_sock_local, "Unknown command.\n", strlen("Unknown command.\n"), 0);
+                if (draw_requested == 1)
+                {
+                    printf("Player %s accepted the draw.\n", players[(client_sock_local == players[0].client_sock) ? 0 : 1].username);
+                    gameState = 0;
+                    draw_requested = 0;
+
+                    Message newMsg = create_message(MSG_GAME_DRAW, NULL, 0);
+                    send_message(client_sock_local, &newMsg);
+                    int opponent = (client_sock_local == players[0].client_sock) ? players[1].client_sock : players[0].client_sock;
+                    send_message(opponent, &newMsg);
+                    // Update draw records for both players
+                    Account *player1 = findAccount(players[0].username);
+                    Account *player2 = findAccount(players[1].username);
+                    if (player1)
+                        player1->draws++;
+                    if (player2)
+                        player2->draws++;
+                    saveAccounts();
+                }
+                else
+                {
+                    Message newMsg = create_message(MSG_ERROR, "No draw request to accept.", strlen("No draw request to accept."));
+                    send_message(client_sock_local, &newMsg);
+                }
+            }
+            break;
+        }
+        case MSG_REFUSE_DRAW:
+        {
+            if (gameState == 0)
+            {
+                Message newMsg = create_message(MSG_ERROR, "Game hasn't started yet.", strlen("Game hasn't started yet."));
+                send_message(client_sock_local, &newMsg);
+            }
+            else
+            {
+                if (draw_requested == 1)
+                {
+                    printf("Player %s refused the draw.\n", players[(client_sock_local == players[0].client_sock) ? 0 : 1].username);
+                    draw_requested = 0;
+                    int opponent = (client_sock_local == players[0].client_sock) ? players[1].client_sock : players[0].client_sock;
+                    Message newMsg = create_message(MSG_REFUSE_DRAW, "Opponent refused your request for a draw", strlen("Opponent refused your request for a draw"));
+                    send_message(opponent, &newMsg);
+                }
+                else
+                {
+                    Message newMsg = create_message(MSG_ERROR, "No draw request to refuse.", strlen("No draw request to refuse."));
+                    send_message(client_sock_local, &newMsg);
+                }
+            }
+            break;
+        }
+        case MSG_SURRENDER:
+        {
+            if (gameState == 0)
+            {
+                Message newMsg = create_message(MSG_ERROR, "Game hasn't started yet.", strlen("Game hasn't started yet."));
+                send_message(client_sock_local, &newMsg);
+            }
+            else
+            {
+                printf("Player %s surrendered.\n", players[(client_sock_local == players[0].client_sock) ? 0 : 1].username);
+                gameState = 0;
+                Message newMsg = create_message(MSG_GAME_LOSE, "You surrendered. Game over.", strlen("You surrendered. Game over."));
+                send_message(client_sock_local, &newMsg);
+                int opponent = (client_sock_local == players[0].client_sock) ? players[1].client_sock : players[0].client_sock;
+                newMsg = create_message(MSG_GAME_WIN, "Opponent surrendered. You win!", strlen("Opponent surrendered. You win!"));
+                send_message(opponent, &newMsg);
+                // Update win/loss records
+                Account *winner = findAccount(players[(client_sock_local == players[0].client_sock) ? 1 : 0].username);
+                Account *loser = findAccount(players[(client_sock_local == players[0].client_sock) ? 0 : 1].username);
+                if (winner)
+                    winner->wins++;
+                if (loser)
+                    loser->losses++;
+                saveAccounts();
+            }
+            break;
+        }
+        case MSG_LOGIN:
+        {
+            if (strlen(players[(client_sock_local == players[0].client_sock) ? 0 : 1].username) > 0)
+            {
+                Message newMsg = create_message(MSG_ERROR, "You are already logged in.", strlen("You are already logged in."));
+                send_message(client_sock_local, &newMsg);
+            }
+            else if (findAccount(((AuthData *)msg.data)->username) != NULL &&
+                     strcmp(players[(client_sock_local == players[0].client_sock) ? 1 : 0].username, ((AuthData *)msg.data)->username) == 0)
+            {
+                Message newMsg = create_message(MSG_ERROR, "This account is already logged in by your opponent.", strlen("This account is already logged in by your opponent."));
+                send_message(client_sock_local, &newMsg);
+            }
+            else
+            {
+                AuthData *authData = (AuthData *)msg.data;
+                Account *account = findAccount(authData->username);
+                if (account != NULL && strcmp(account->password, authData->password) == 0)
+                {
+                    strcpy(players[(client_sock_local == players[0].client_sock) ? 0 : 1].username, authData->username);
+                    Message newMsg = create_message(MSG_SUCCESS, "Login successful.", strlen("Login successful."));
+                    send_message(client_sock_local, &newMsg);
+                    printf("Player %s logged in.\n", authData->username);
+                }
+                else
+                {
+                    Message newMsg = create_message(MSG_ERROR, "Invalid username or password.", strlen("Invalid username or password."));
+                    send_message(client_sock_local, &newMsg);
+                }
+            }
+            break;
+        }
+        case MSG_SIGNUP:
+        {
+            if (strlen(players[(client_sock_local == players[0].client_sock) ? 0 : 1].username) > 0)
+            {
+                Message newMsg = create_message(MSG_ERROR, "You are already logged in.", strlen("You are already logged in."));
+                send_message(client_sock_local, &newMsg);
+                break;
+            }
+            AuthData *authData = (AuthData *)msg.data;
+            Account *account = findAccount(authData->username);
+            if (account == NULL)
+            {
+                Account *newAccount = (Account *)malloc(sizeof(Account));
+                strcpy(newAccount->username, authData->username);
+                strcpy(newAccount->password, authData->password);
+                newAccount->wins = 0;
+                newAccount->losses = 0;
+                newAccount->draws = 0;
+                newAccount->next = head;
+                head = newAccount;
+                saveAccounts();
+                Message newMsg = create_message(MSG_SUCCESS, "Account created successfully.", strlen("Account created successfully."));
+                send_message(client_sock_local, &newMsg);
+                printf("Player %s signed up.\n", authData->username);
+            }
+            else
+            {
+                Message newMsg = create_message(MSG_ERROR, "Username already exists.", strlen("Username already exists."));
+                send_message(client_sock_local, &newMsg);
+            }
+            break;
+        }
+        case MSG_LOGOUT:
+        {
+            if (strlen(players[(client_sock_local == players[0].client_sock) ? 0 : 1].username) == 0)
+            {
+                Message newMsg = create_message(MSG_ERROR, "You are not logged in.", strlen("You are not logged in."));
+                send_message(client_sock_local, &newMsg);
+            }
+            else
+            {
+                printf("Player %s logged out.\n", players[(client_sock_local == players[0].client_sock) ? 0 : 1].username);
+                strcpy(players[(client_sock_local == players[0].client_sock) ? 0 : 1].username, "");
+                Message newMsg = create_message(MSG_SUCCESS, "Logout successful.", strlen("Logout successful."));
+                send_message(client_sock_local, &newMsg);
+            }
+            break;
+        }
+        case MSG_READY:
+        {
+            if (gameState == 1)
+            {
+                Message newMsg = create_message(MSG_ERROR, "Game has already started.", strlen("Game has already started."));
+                send_message(client_sock_local, &newMsg);
+                break;
+            }
+            if (strlen(players[(client_sock_local == players[0].client_sock) ? 0 : 1].username) == 0)
+            {
+                Message newMsg = create_message(MSG_ERROR, "You are not logged in.", strlen("You are not logged in."));
+                send_message(client_sock_local, &newMsg);
+                break;
+            }
+            players[(client_sock_local == players[0].client_sock) ? 0 : 1].ready = true;
+            Message newMsg = create_message(MSG_SUCCESS, "You are ready.", strlen("You are ready."));
+            send_message(client_sock_local, &newMsg);
+            int playerIndex = (client_sock_local == players[0].client_sock) ? 0 : 1;
+            printf("Player %d (%s) is ready.\n", playerIndex + 1, players[playerIndex].username);
+            if (connectedClients < 2)
+            {
+                Message newMsg = create_message(MSG_WAIT, NULL, 0);
+                send_message(client_sock_local, &newMsg);
+                break;
+            }
+            if (players[0].ready && players[1].ready)
+            {
+                printf("Game started.\n");
+                gameState = 1;
+                initializeBoard();
+                players[0].ready = false;
+                players[1].ready = false;
+                // Message newMsg = create_message(MSG_GAME_BOARD, board, sizeof(board));
+                // for (int i = 0; i < MAX_CLIENTS; i++)
+                // {
+                //     send_message(players[i].client_sock, &newMsg);
+                // }
+                // printBoardToAllClients();
+                sendBoardToBothClients();
+            }
+            break;
+        }
+        case MSG_CHAT:
+        {
+            ChatData *chatData = (ChatData *)msg.data;
+            if (!chatData || strlen(players[(client_sock_local == players[0].client_sock) ? 0 : 1].username) == 0)
+            {
+                Message errMsg = create_message(MSG_ERROR, "You must be logged in to chat", strlen("You must be logged in to chat"));
+                send_message(client_sock_local, &errMsg);
+            }
+            else
+            {
+                char buffer[BUFFER_SIZE];
+                snprintf(buffer, sizeof(buffer), "%s: %s", players[(client_sock_local == players[0].client_sock) ? 0 : 1].username, chatData->message);
+                Message newMsg = create_message(MSG_CHAT, buffer, strlen(buffer));
+                int opponent = players[(client_sock_local == players[0].client_sock) ? 1 : 0].client_sock;
+                if (opponent != -1)
+                {
+                    send_message(opponent, &newMsg);
+                    printf("%s: %s\n", players[(client_sock_local == players[0].client_sock) ? 0 : 1].username, chatData->message);
+                }
+            }
+            break;
+        }
+        case MSG_GET_BOARD:
+        {
+            if (gameState == 0)
+            {
+                Message newMsg = create_message(MSG_ERROR, "Game hasn't started yet.", strlen("Game hasn't started yet."));
+                send_message(client_sock_local, &newMsg);
+            }
+            else
+            {
+                // Message newMsg = create_message(MSG_GAME_BOARD, board, sizeof(board));
+                // send_message(client_sock_local, &newMsg);
+                sendBoardToBothClients();
+            }
+            break;
+        }
+        case MSG_GET_LEADERBOARD:
+        {
+            char buffer[BUFFER_SIZE];
+            // Create array of accounts and scores
+            typedef struct
+            {
+                Account *account;
+                float score;
+            } AccountScore;
+
+            int count = 0;
+            Account *current = head;
+            while (current != NULL)
+            {
+                count++;
+                current = current->next;
+            }
+
+            AccountScore scores[count];
+            current = head;
+            int i = 0;
+            while (current != NULL)
+            {
+                scores[i].account = current;
+                scores[i].score = current->wins + (current->draws * 0.5) - (current->losses * 0.5);
+                i++;
+                current = current->next;
+            }
+
+            // Sort by score descending
+            for (i = 0; i < count - 1; i++)
+            {
+                for (int j = 0; j < count - i - 1; j++)
+                {
+                    if (scores[j].score < scores[j + 1].score)
+                    {
+                        AccountScore temp = scores[j];
+                        scores[j] = scores[j + 1];
+                        scores[j + 1] = temp;
+                    }
+                }
+            }
+
+            // Format leaderboard message
+            for (i = 0; i < count; i++)
+            {
+                snprintf(buffer + strlen(buffer), sizeof(buffer) - strlen(buffer),
+                         "%s: %d wins, %d losses, %d draws (Score: %.1f)\n",
+                         scores[i].account->username,
+                         scores[i].account->wins,
+                         scores[i].account->losses,
+                         scores[i].account->draws,
+                         scores[i].score);
+            }
+
+            Message newMsg = create_message(MSG_LEADERBOARD, buffer, strlen(buffer));
+            send_message(client_sock_local, &newMsg);
+            break;
+        }
+        default:
+            Message newMsg = create_message(MSG_ERROR, "Unknown command.", strlen("Unknown command."));
+            send_message(client_sock_local, &newMsg);
+            break;
+        }
+        /*
+        if (strncmp(buffer, "move ", 5) == 0)
+        {
+            if (currentPlayer != (client_sock_local == client_sock[0] ? 1 : 2))
+            {
+                send(client_sock_local, "It's not your turn!\n", strlen("It's not your turn!\n"), 0);
+                continue; // Skip this iteration and wait for the correct turn
+            }
+
+            int src_row, src_col, dest_row, dest_col;
+            sscanf(buffer + 5, "%d %d %d %d", &src_row, &src_col, &dest_row, &dest_col);
+
+            if (isValidMove(src_row, src_col, dest_row, dest_col, currentPlayer) > 0)
+            {
+                board[dest_row][dest_col] = board[src_row][src_col];
+                board[src_row][src_col] = EMPTY;
+                currentPlayer = (currentPlayer == 1) ? 2 : 1;
+                printBoardToAllClients();
+            }
+            else
+            {
+                send(client_sock_local, "Invalid move!\n", strlen("Invalid move!\n"), 0);
             }
         }
+        else if (strcmp(buffer, "draw") == 0)
+        {
+            if (draw_requested == 0)
+            {
+                // First player requests a draw
+                draw_requested = 1; // Set draw request
+                send(client_sock_local, "Draw request sent to opponent.\n", strlen("Draw request sent to opponent.\n"), 0);
+
+                // Notify opponent
+                int opponent = (client_sock_local == client_sock[0]) ? client_sock[1] : client_sock[0];
+                send(opponent, "Opponent requests a draw. Type 'draw' to accept.\n", strlen("Opponent requests a draw. Type 'draw' to accept.\n"), 0);
+            }
+            else
+            {
+                // Second player accepts the draw
+                send(client_sock_local, "You accepted the draw. Game ends in a draw.\n", strlen("You accepted the draw. Game ends in a draw.\n"), 0);
+
+                // Notify opponent
+                int opponent = (client_sock_local == client_sock[0]) ? client_sock[1] : client_sock[0];
+                send(opponent, "Opponent accepted the draw. Game ends in a draw.\n", strlen("Opponent accepted the draw. Game ends in a draw.\n"), 0);
+
+                // End the game (implement proper cleanup here)
+                draw_requested = 0; // Reset draw state
+            }
+        }
+        else if (strcmp(buffer, "surrender") == 0)
+        {
+            send(client_sock_local, "You surrendered. Game over.\n", strlen("You surrendered. Game over.\n"), 0);
+            int opponent = (client_sock_local == client_sock[0]) ? client_sock[1] : client_sock[0];
+            send(opponent, "Opponent surrendered. You win!\n", strlen("Opponent surrendered. You win!\n"), 0);
+        }
+        else
+        {
+            send(client_sock_local, "Unknown command.\n", strlen("Unknown command.\n"), 0);
+        }
+        */
     }
 
     // Handle client disconnection properly
-    close(client_sock_local);
+    int opponent = (client_sock_local == players[0].client_sock) ? players[1].client_sock : players[0].client_sock;
+    if (opponent != -1)
+    {
+        Message newMsg = create_message(MSG_ERROR, "Opponent disconnected", strlen("Opponent disconnected"));
+        send_message(opponent, &newMsg);
+
+        if (gameState == 1)
+        {
+            newMsg = create_message(MSG_GAME_WIN, "You win!", strlen("You win!"));
+            send_message(opponent, &newMsg);
+            gameState = 0;
+            // Update win/loss records
+            Account *winner = findAccount(players[(client_sock_local == players[0].client_sock) ? 1 : 0].username);
+            Account *loser = findAccount(players[(client_sock_local == players[0].client_sock) ? 0 : 1].username);
+            if (winner)
+                winner->wins++;
+            if (loser)
+                loser->losses++;
+            saveAccounts();
+        }
+    }
     pthread_mutex_lock(&client_mutex);
-    connectedClients--;
     for (int i = 0; i < MAX_CLIENTS; i++)
     {
-        if (client_sock[i] == client_sock_local)
+        if (players[i].client_sock == client_sock_local)
         {
-            client_sock[i] = -1;
+            players[i].client_sock = -1;
+            players[i].ready = false;
+            strcpy(players[i].username, "");
+            connectedClients--;
             break;
         }
     }
+    close(client_sock_local);
     pthread_mutex_unlock(&client_mutex);
     return NULL;
 }
@@ -361,10 +957,14 @@ int main()
     int addrlen = sizeof(address);
     pthread_t threads[MAX_CLIENTS];
 
+    loadAccounts();
+
     // Initialize client_sock array to -1
     for (int i = 0; i < MAX_CLIENTS; i++)
     {
-        client_sock[i] = -1;
+        players[i].client_sock = -1;
+        players[i].ready = false;
+        strcpy(players[i].username, "");
     }
 
     // Create socket
@@ -414,15 +1014,17 @@ int main()
         pthread_mutex_lock(&client_mutex);
         for (int i = 0; i < MAX_CLIENTS; i++)
         {
-            if (client_sock[i] == -1)
+            if (players[i].client_sock == -1)
             {
-                client_sock[i] = new_socket;
-                pthread_create(&threads[i], NULL, handleClient, &client_sock[i]);
+                players[i].client_sock = new_socket;
+                pthread_create(&threads[i], NULL, handleClient, &players[i].client_sock);
                 break;
             }
         }
         pthread_mutex_unlock(&client_mutex);
     }
 
+    close(server_fd);
+    freeAccounts();
     return 0;
 }
