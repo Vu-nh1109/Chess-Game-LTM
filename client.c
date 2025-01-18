@@ -338,7 +338,7 @@ int main()
     }
 
     server.sin_family = AF_INET;
-    server.sin_addr.s_addr = inet_addr("172.31.73.220");
+    server.sin_addr.s_addr = inet_addr("127.0.0.1"); // Change to the server IP address
     server.sin_port = htons(PORT);
 
     // Connect to server

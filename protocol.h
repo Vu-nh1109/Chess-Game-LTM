@@ -2,30 +2,30 @@
 #define PROTOCOL_H
 
 typedef enum {
-    MSG_GAME_BOARD,
-    MSG_GET_BOARD,
-    MSG_MOVE,
-    MSG_REQUEST_DRAW,
-    MSG_ACCEPT_DRAW,
-    MSG_REFUSE_DRAW,
-    MSG_SURRENDER,
-    MSG_LOGIN,
-    MSG_SIGNUP,
-    MSG_LOGOUT,
-    MSG_READY,
-    MSG_CHAT,
-    MSG_ERROR,
-    MSG_SUCCESS,
-    MSG_GAME_WIN,
-    MSG_GAME_LOSE,
-    MSG_GAME_DRAW,
-    MSG_WAIT,
-    MSG_GET_LEADERBOARD,
-    MSG_LEADERBOARD
+    MSG_GAME_BOARD,     //server sends board to client
+    MSG_GET_BOARD,      //client requests board from server
+    MSG_MOVE,           //client sends move data to server
+    MSG_REQUEST_DRAW,   //1 client sends draw request to another client
+    MSG_ACCEPT_DRAW,    //client accepts draw request 
+    MSG_REFUSE_DRAW,    //client refuses draw request
+    MSG_SURRENDER,      //client sends request to end the game with a loss
+    MSG_LOGIN,          //client requests loggin in
+    MSG_SIGNUP,         //client requests sign up
+    MSG_LOGOUT,         //client requests sign out
+    MSG_READY,          //client sends signal to server to be ready for new game or play again
+    MSG_CHAT,           //client sends chat message to the other client
+    MSG_ERROR,          //server sends error message to client
+    MSG_SUCCESS,        //server sends success message to client
+    MSG_GAME_WIN,       //server sends win notification to winning client
+    MSG_GAME_LOSE,      //server sends lose notification to losing client
+    MSG_GAME_DRAW,      //server sends draw notification to both clients
+    MSG_WAIT,           //server sends wait message to a ready client if there is no other connected client
+    MSG_GET_LEADERBOARD,//client requests leaderboard info from server
+    MSG_LEADERBOARD     //server sends leaderboard info to client
 } MessageType;
 
 typedef enum {
-    STATUS_ERROR,
+    STATUS_ERROR,       //returns error if can't connect to client or server
     STATUS_SUCCESS
 } MessageStatus;
 

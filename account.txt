@@ -1,4 +1,5 @@
-user4 user4 4 1 0
+user5 user5 3 0 1
+user4 user4 4 5 1
 user3 user3 1 2 1
-user1 user1 2 9 0
-user2 user2 8 5 5
+user1 user1 3 10 0
+user2 user2 9 5 5
